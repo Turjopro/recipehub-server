@@ -12,10 +12,14 @@ const app = express();
 const port = process.env.PORT || 5000;
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-app.use(cors({
-  origin: ["http://localhost:5173"],
-  credentials: true,
-}));
+const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
+
+app.use(
+  cors({
+    origin: ["http://localhost:5173", "https://recipehub-client-ten.vercel.app"],
+    credentials: true,
+  })
+);
 
 app.all("/api/auth/*splat", toNodeHandler(auth));
 app.use(express.json());
@@ -30,6 +34,8 @@ const client = new MongoClient(uri, {
   },
 });
 
+const VALID_REPORT_REASONS = ["Spam", "Offensive Content", "Copyright Issue"];
+
 async function run() {
   try {
     await client.connect();
@@ -43,7 +49,6 @@ async function run() {
 
     // ===== AUTH MIDDLEWARE =====
 
-    // Verify user is logged in (better-auth session check)
     const verifyToken = async (req, res, next) => {
       try {
         const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
@@ -57,7 +62,6 @@ async function run() {
       }
     };
 
-    // Verify user is admin (use AFTER verifyToken)
     const verifyAdmin = async (req, res, next) => {
       const user = await usersCollection.findOne({ email: req.user.email });
       if (user?.role !== "admin") {
@@ -72,13 +76,12 @@ async function run() {
 
     // ===== PAYMENTS (Stripe) =====
 
-    // Create a checkout session (for recipe purchase or premium membership)
     app.post("/create-checkout-session", verifyToken, async (req, res) => {
       try {
         const { type, recipeId, recipeName, userEmail, userId } = req.body;
 
         const isPremium = type === "premium";
-        const amount = isPremium ? 2000 : 500; // in cents: $20 premium, $5 recipe
+        const amount = isPremium ? 2000 : 500;
         const productName = isPremium ? "RecipeHub Premium Membership" : `Recipe: ${recipeName}`;
 
         const session = await stripe.checkout.sessions.create({
@@ -94,8 +97,8 @@ async function run() {
             },
           ],
           mode: "payment",
-          success_url: `http://localhost:5173/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-          cancel_url: `http://localhost:5173/recipe/${recipeId || ""}`,
+          success_url: `${CLIENT_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `${CLIENT_URL}/recipe/${recipeId || ""}`,
           metadata: {
             type,
             recipeId: recipeId || "",
@@ -110,7 +113,6 @@ async function run() {
       }
     });
 
-    // Verify payment and record it (called from success page)
     app.get("/verify-payment/:sessionId", verifyToken, async (req, res) => {
       try {
         const session = await stripe.checkout.sessions.retrieve(req.params.sessionId);
@@ -148,7 +150,6 @@ async function run() {
       }
     });
 
-    // Get purchased recipes for a user
     app.get("/purchased-recipes/:email", verifyToken, async (req, res) => {
       try {
         const payments = await paymentsCollection.find({ userEmail: req.params.email, type: "recipe" }).toArray();
@@ -162,7 +163,6 @@ async function run() {
 
     // ===== ADMIN =====
 
-    // Get all users (admin only)
     app.get("/users", verifyToken, verifyAdmin, async (req, res) => {
       try {
         const users = await usersCollection.find().toArray();
@@ -172,7 +172,6 @@ async function run() {
       }
     });
 
-    // Block/Unblock a user
     app.patch("/users/:id/block", verifyToken, verifyAdmin, async (req, res) => {
       try {
         const { isBlocked } = req.body;
@@ -186,7 +185,23 @@ async function run() {
       }
     });
 
-    // Admin dashboard stats
+    // profile update (self only)
+    app.patch("/users/:email", verifyToken, async (req, res) => {
+      try {
+        if (req.user.email !== req.params.email) {
+          return res.status(403).send({ message: "Forbidden: You can only update your own profile" });
+        }
+        const { name, image } = req.body;
+        const result = await usersCollection.updateOne(
+          { email: req.params.email },
+          { $set: { name, image, updatedAt: new Date() } }
+        );
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to update profile", error: err.message });
+      }
+    });
+
     app.get("/admin-stats", verifyToken, verifyAdmin, async (req, res) => {
       try {
         const totalUsers = await usersCollection.countDocuments();
@@ -200,7 +215,6 @@ async function run() {
       }
     });
 
-    // Feature/Unfeature a recipe (admin)
     app.patch("/recipes/:id/feature", verifyToken, verifyAdmin, async (req, res) => {
       try {
         const { isFeatured } = req.body;
@@ -214,7 +228,6 @@ async function run() {
       }
     });
 
-    // Get all reports (admin)
     app.get("/reports", verifyToken, verifyAdmin, async (req, res) => {
       try {
         const reports = await reportsCollection.find().sort({ createdAt: -1 }).toArray();
@@ -224,7 +237,6 @@ async function run() {
       }
     });
 
-    // Dismiss a report
     app.patch("/reports/:id/dismiss", verifyToken, verifyAdmin, async (req, res) => {
       try {
         const result = await reportsCollection.updateOne(
@@ -237,7 +249,23 @@ async function run() {
       }
     });
 
-    // Get all transactions/payments (admin)
+    // remove reported recipe + mark report resolved
+    app.patch("/reports/:id/remove-recipe", verifyToken, verifyAdmin, async (req, res) => {
+      try {
+        const report = await reportsCollection.findOne({ _id: new ObjectId(req.params.id) });
+        if (!report) return res.status(404).send({ message: "Report not found" });
+
+        await recipesCollection.deleteOne({ _id: new ObjectId(report.recipeId) });
+        const result = await reportsCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: { status: "resolved" } }
+        );
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to remove recipe", error: err.message });
+      }
+    });
+
     app.get("/payments", verifyToken, verifyAdmin, async (req, res) => {
       try {
         const payments = await paymentsCollection.find().sort({ paidAt: -1 }).toArray();
@@ -249,7 +277,6 @@ async function run() {
 
     // ===== RECIPES =====
 
-    // Get all recipes (with optional category filter + pagination)
     app.get("/recipes", async (req, res) => {
       try {
         const { category, page = 1, limit = 9 } = req.query;
@@ -274,7 +301,6 @@ async function run() {
       }
     });
 
-    // Get featured recipes
     app.get("/recipes/featured", async (req, res) => {
       try {
         const recipes = await recipesCollection.find({ isFeatured: true }).limit(6).toArray();
@@ -284,7 +310,6 @@ async function run() {
       }
     });
 
-    // Get popular recipes (most liked)
     app.get("/recipes/popular", async (req, res) => {
       try {
         const recipes = await recipesCollection
@@ -298,7 +323,6 @@ async function run() {
       }
     });
 
-    // Get recipes by a specific user (My Recipes) — must come before /recipes/:id
     app.get("/my-recipes/:email", verifyToken, async (req, res) => {
       try {
         const recipes = await recipesCollection.find({ authorEmail: req.params.email }).toArray();
@@ -308,7 +332,6 @@ async function run() {
       }
     });
 
-    // Get dashboard stats for a user
     app.get("/user-stats/:email", verifyToken, async (req, res) => {
       try {
         const email = req.params.email;
@@ -326,7 +349,6 @@ async function run() {
       }
     });
 
-    // Get single recipe by id
     app.get("/recipes/:id", async (req, res) => {
       try {
         const recipe = await recipesCollection.findOne({ _id: new ObjectId(req.params.id) });
@@ -337,7 +359,6 @@ async function run() {
       }
     });
 
-    // Add a new recipe
     app.post("/recipes", verifyToken, async (req, res) => {
       try {
         const recipe = req.body;
@@ -367,9 +388,17 @@ async function run() {
       }
     });
 
-    // Update a recipe
+    // owner (or admin) check added
     app.patch("/recipes/:id", verifyToken, async (req, res) => {
       try {
+        const recipe = await recipesCollection.findOne({ _id: new ObjectId(req.params.id) });
+        if (!recipe) return res.status(404).send({ message: "Recipe not found" });
+
+        const user = await usersCollection.findOne({ email: req.user.email });
+        if (recipe.authorEmail !== req.user.email && user?.role !== "admin") {
+          return res.status(403).send({ message: "Forbidden: You can only edit your own recipe" });
+        }
+
         const updatedData = { ...req.body, updatedAt: new Date() };
         const result = await recipesCollection.updateOne(
           { _id: new ObjectId(req.params.id) },
@@ -381,9 +410,17 @@ async function run() {
       }
     });
 
-    // Delete a recipe
+    // owner (or admin) check added
     app.delete("/recipes/:id", verifyToken, async (req, res) => {
       try {
+        const recipe = await recipesCollection.findOne({ _id: new ObjectId(req.params.id) });
+        if (!recipe) return res.status(404).send({ message: "Recipe not found" });
+
+        const user = await usersCollection.findOne({ email: req.user.email });
+        if (recipe.authorEmail !== req.user.email && user?.role !== "admin") {
+          return res.status(403).send({ message: "Forbidden: You can only delete your own recipe" });
+        }
+
         const result = await recipesCollection.deleteOne({ _id: new ObjectId(req.params.id) });
         res.send(result);
       } catch (err) {
@@ -391,7 +428,6 @@ async function run() {
       }
     });
 
-    // Like a recipe (increment likesCount)
     app.patch("/recipes/:id/like", verifyToken, async (req, res) => {
       try {
         const result = await recipesCollection.updateOne(
@@ -406,7 +442,6 @@ async function run() {
 
     // ===== FAVORITES =====
 
-    // Get user's favorite recipes (with full recipe details)
     app.get("/favorites/:email", verifyToken, async (req, res) => {
       try {
         const favorites = await favoritesCollection.find({ userEmail: req.params.email }).toArray();
@@ -418,7 +453,6 @@ async function run() {
       }
     });
 
-    // Check if a recipe is favorited by user
     app.get("/favorites/check/:email/:recipeId", verifyToken, async (req, res) => {
       try {
         const fav = await favoritesCollection.findOne({
@@ -431,7 +465,6 @@ async function run() {
       }
     });
 
-    // Add to favorites
     app.post("/favorites", verifyToken, async (req, res) => {
       try {
         const { userEmail, userId, recipeId } = req.body;
@@ -450,7 +483,6 @@ async function run() {
       }
     });
 
-    // Remove from favorites
     app.delete("/favorites/:email/:recipeId", verifyToken, async (req, res) => {
       try {
         const result = await favoritesCollection.deleteOne({
@@ -465,10 +497,15 @@ async function run() {
 
     // ===== REPORTS =====
 
-    // Submit a report
+    // reason validation added
     app.post("/reports", verifyToken, async (req, res) => {
       try {
         const { recipeId, reporterEmail, reason } = req.body;
+
+        if (!VALID_REPORT_REASONS.includes(reason)) {
+          return res.status(400).send({ message: "Invalid report reason" });
+        }
+
         const result = await reportsCollection.insertOne({
           recipeId,
           reporterEmail,
