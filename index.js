@@ -1,12 +1,12 @@
 import Stripe from "stripe";
 import { auth } from "./auth.js";
-import { toNodeHandler } from "better-auth/node";
+import { toNodeHandler, fromNodeHeaders } from "better-auth/node";
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { MongoClient, ServerApiVersion, ObjectId } from "mongodb";
 
-dotenv.config();
+dotenv.config({ override: true });
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -41,6 +41,31 @@ async function run() {
     const reportsCollection = db.collection("reports");
     const paymentsCollection = db.collection("payments");
 
+    // ===== AUTH MIDDLEWARE =====
+
+    // Verify user is logged in (better-auth session check)
+    const verifyToken = async (req, res, next) => {
+      try {
+        const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
+        if (!session?.user) {
+          return res.status(401).send({ message: "Unauthorized access" });
+        }
+        req.user = session.user;
+        next();
+      } catch (err) {
+        res.status(401).send({ message: "Unauthorized access" });
+      }
+    };
+
+    // Verify user is admin (use AFTER verifyToken)
+    const verifyAdmin = async (req, res, next) => {
+      const user = await usersCollection.findOne({ email: req.user.email });
+      if (user?.role !== "admin") {
+        return res.status(403).send({ message: "Forbidden: Admin access only" });
+      }
+      next();
+    };
+
     app.get("/", (req, res) => {
       res.send("RecipeHub server is running");
     });
@@ -48,7 +73,7 @@ async function run() {
     // ===== PAYMENTS (Stripe) =====
 
     // Create a checkout session (for recipe purchase or premium membership)
-    app.post("/create-checkout-session", async (req, res) => {
+    app.post("/create-checkout-session", verifyToken, async (req, res) => {
       try {
         const { type, recipeId, recipeName, userEmail, userId } = req.body;
 
@@ -86,7 +111,7 @@ async function run() {
     });
 
     // Verify payment and record it (called from success page)
-    app.get("/verify-payment/:sessionId", async (req, res) => {
+    app.get("/verify-payment/:sessionId", verifyToken, async (req, res) => {
       try {
         const session = await stripe.checkout.sessions.retrieve(req.params.sessionId);
 
@@ -124,7 +149,7 @@ async function run() {
     });
 
     // Get purchased recipes for a user
-    app.get("/purchased-recipes/:email", async (req, res) => {
+    app.get("/purchased-recipes/:email", verifyToken, async (req, res) => {
       try {
         const payments = await paymentsCollection.find({ userEmail: req.params.email, type: "recipe" }).toArray();
         const recipeIds = payments.map((p) => new ObjectId(p.recipeId));
@@ -138,7 +163,7 @@ async function run() {
     // ===== ADMIN =====
 
     // Get all users (admin only)
-    app.get("/users", async (req, res) => {
+    app.get("/users", verifyToken, verifyAdmin, async (req, res) => {
       try {
         const users = await usersCollection.find().toArray();
         res.send(users);
@@ -148,7 +173,7 @@ async function run() {
     });
 
     // Block/Unblock a user
-    app.patch("/users/:id/block", async (req, res) => {
+    app.patch("/users/:id/block", verifyToken, verifyAdmin, async (req, res) => {
       try {
         const { isBlocked } = req.body;
         const result = await usersCollection.updateOne(
@@ -162,7 +187,7 @@ async function run() {
     });
 
     // Admin dashboard stats
-    app.get("/admin-stats", async (req, res) => {
+    app.get("/admin-stats", verifyToken, verifyAdmin, async (req, res) => {
       try {
         const totalUsers = await usersCollection.countDocuments();
         const totalRecipes = await recipesCollection.countDocuments();
@@ -176,7 +201,7 @@ async function run() {
     });
 
     // Feature/Unfeature a recipe (admin)
-    app.patch("/recipes/:id/feature", async (req, res) => {
+    app.patch("/recipes/:id/feature", verifyToken, verifyAdmin, async (req, res) => {
       try {
         const { isFeatured } = req.body;
         const result = await recipesCollection.updateOne(
@@ -190,7 +215,7 @@ async function run() {
     });
 
     // Get all reports (admin)
-    app.get("/reports", async (req, res) => {
+    app.get("/reports", verifyToken, verifyAdmin, async (req, res) => {
       try {
         const reports = await reportsCollection.find().sort({ createdAt: -1 }).toArray();
         res.send(reports);
@@ -200,7 +225,7 @@ async function run() {
     });
 
     // Dismiss a report
-    app.patch("/reports/:id/dismiss", async (req, res) => {
+    app.patch("/reports/:id/dismiss", verifyToken, verifyAdmin, async (req, res) => {
       try {
         const result = await reportsCollection.updateOne(
           { _id: new ObjectId(req.params.id) },
@@ -213,7 +238,7 @@ async function run() {
     });
 
     // Get all transactions/payments (admin)
-    app.get("/payments", async (req, res) => {
+    app.get("/payments", verifyToken, verifyAdmin, async (req, res) => {
       try {
         const payments = await paymentsCollection.find().sort({ paidAt: -1 }).toArray();
         res.send(payments);
@@ -274,7 +299,7 @@ async function run() {
     });
 
     // Get recipes by a specific user (My Recipes) — must come before /recipes/:id
-    app.get("/my-recipes/:email", async (req, res) => {
+    app.get("/my-recipes/:email", verifyToken, async (req, res) => {
       try {
         const recipes = await recipesCollection.find({ authorEmail: req.params.email }).toArray();
         res.send(recipes);
@@ -284,7 +309,7 @@ async function run() {
     });
 
     // Get dashboard stats for a user
-    app.get("/user-stats/:email", async (req, res) => {
+    app.get("/user-stats/:email", verifyToken, async (req, res) => {
       try {
         const email = req.params.email;
         const myRecipes = await recipesCollection.find({ authorEmail: email }).toArray();
@@ -313,9 +338,22 @@ async function run() {
     });
 
     // Add a new recipe
-    app.post("/recipes", async (req, res) => {
+    app.post("/recipes", verifyToken, async (req, res) => {
       try {
         const recipe = req.body;
+
+        const user = await usersCollection.findOne({ email: recipe.authorEmail });
+        const isPremium = user?.isPremium || false;
+
+        if (!isPremium) {
+          const existingCount = await recipesCollection.countDocuments({ authorEmail: recipe.authorEmail });
+          if (existingCount >= 2) {
+            return res.status(403).send({
+              message: "Free users can add a maximum of 2 recipes. Upgrade to Premium for unlimited recipes.",
+            });
+          }
+        }
+
         recipe.likesCount = 0;
         recipe.isFeatured = false;
         recipe.status = "active";
@@ -330,7 +368,7 @@ async function run() {
     });
 
     // Update a recipe
-    app.patch("/recipes/:id", async (req, res) => {
+    app.patch("/recipes/:id", verifyToken, async (req, res) => {
       try {
         const updatedData = { ...req.body, updatedAt: new Date() };
         const result = await recipesCollection.updateOne(
@@ -344,7 +382,7 @@ async function run() {
     });
 
     // Delete a recipe
-    app.delete("/recipes/:id", async (req, res) => {
+    app.delete("/recipes/:id", verifyToken, async (req, res) => {
       try {
         const result = await recipesCollection.deleteOne({ _id: new ObjectId(req.params.id) });
         res.send(result);
@@ -354,7 +392,7 @@ async function run() {
     });
 
     // Like a recipe (increment likesCount)
-    app.patch("/recipes/:id/like", async (req, res) => {
+    app.patch("/recipes/:id/like", verifyToken, async (req, res) => {
       try {
         const result = await recipesCollection.updateOne(
           { _id: new ObjectId(req.params.id) },
@@ -369,7 +407,7 @@ async function run() {
     // ===== FAVORITES =====
 
     // Get user's favorite recipes (with full recipe details)
-    app.get("/favorites/:email", async (req, res) => {
+    app.get("/favorites/:email", verifyToken, async (req, res) => {
       try {
         const favorites = await favoritesCollection.find({ userEmail: req.params.email }).toArray();
         const recipeIds = favorites.map((f) => new ObjectId(f.recipeId));
@@ -381,7 +419,7 @@ async function run() {
     });
 
     // Check if a recipe is favorited by user
-    app.get("/favorites/check/:email/:recipeId", async (req, res) => {
+    app.get("/favorites/check/:email/:recipeId", verifyToken, async (req, res) => {
       try {
         const fav = await favoritesCollection.findOne({
           userEmail: req.params.email,
@@ -394,7 +432,7 @@ async function run() {
     });
 
     // Add to favorites
-    app.post("/favorites", async (req, res) => {
+    app.post("/favorites", verifyToken, async (req, res) => {
       try {
         const { userEmail, userId, recipeId } = req.body;
         const exists = await favoritesCollection.findOne({ userEmail, recipeId });
@@ -413,7 +451,7 @@ async function run() {
     });
 
     // Remove from favorites
-    app.delete("/favorites/:email/:recipeId", async (req, res) => {
+    app.delete("/favorites/:email/:recipeId", verifyToken, async (req, res) => {
       try {
         const result = await favoritesCollection.deleteOne({
           userEmail: req.params.email,
@@ -428,7 +466,7 @@ async function run() {
     // ===== REPORTS =====
 
     // Submit a report
-    app.post("/reports", async (req, res) => {
+    app.post("/reports", verifyToken, async (req, res) => {
       try {
         const { recipeId, reporterEmail, reason } = req.body;
         const result = await reportsCollection.insertOne({
