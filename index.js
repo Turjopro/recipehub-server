@@ -43,6 +43,8 @@ async function run() {
       res.send("RecipeHub server is running");
     });
 
+    // ===== RECIPES =====
+
     // Get all recipes (with optional category filter + pagination)
     app.get("/recipes", async (req, res) => {
       try {
@@ -164,6 +166,84 @@ async function run() {
         res.send(result);
       } catch (err) {
         res.status(500).send({ message: "Failed to like recipe", error: err.message });
+      }
+    });
+
+    // ===== FAVORITES =====
+
+    // Get user's favorite recipes (with full recipe details)
+    app.get("/favorites/:email", async (req, res) => {
+      try {
+        const favorites = await favoritesCollection.find({ userEmail: req.params.email }).toArray();
+        const recipeIds = favorites.map((f) => new ObjectId(f.recipeId));
+        const recipes = await recipesCollection.find({ _id: { $in: recipeIds } }).toArray();
+        res.send(recipes);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch favorites", error: err.message });
+      }
+    });
+
+    // Check if a recipe is favorited by user
+    app.get("/favorites/check/:email/:recipeId", async (req, res) => {
+      try {
+        const fav = await favoritesCollection.findOne({
+          userEmail: req.params.email,
+          recipeId: req.params.recipeId,
+        });
+        res.send({ isFavorited: !!fav });
+      } catch (err) {
+        res.status(500).send({ message: "Failed to check favorite", error: err.message });
+      }
+    });
+
+    // Add to favorites
+    app.post("/favorites", async (req, res) => {
+      try {
+        const { userEmail, userId, recipeId } = req.body;
+        const exists = await favoritesCollection.findOne({ userEmail, recipeId });
+        if (exists) return res.status(400).send({ message: "Already in favorites" });
+
+        const result = await favoritesCollection.insertOne({
+          userEmail,
+          userId,
+          recipeId,
+          addedAt: new Date(),
+        });
+        res.status(201).send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to add favorite", error: err.message });
+      }
+    });
+
+    // Remove from favorites
+    app.delete("/favorites/:email/:recipeId", async (req, res) => {
+      try {
+        const result = await favoritesCollection.deleteOne({
+          userEmail: req.params.email,
+          recipeId: req.params.recipeId,
+        });
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to remove favorite", error: err.message });
+      }
+    });
+
+    // ===== REPORTS =====
+
+    // Submit a report
+    app.post("/reports", async (req, res) => {
+      try {
+        const { recipeId, reporterEmail, reason } = req.body;
+        const result = await reportsCollection.insertOne({
+          recipeId,
+          reporterEmail,
+          reason,
+          status: "pending",
+          createdAt: new Date(),
+        });
+        res.status(201).send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to submit report", error: err.message });
       }
     });
 
