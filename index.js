@@ -104,6 +104,24 @@ async function run() {
       }
     });
 
+    // Get dashboard stats for a user
+    app.get("/user-stats/:email", async (req, res) => {
+      try {
+        const email = req.params.email;
+        const myRecipes = await recipesCollection.find({ authorEmail: email }).toArray();
+        const totalRecipes = myRecipes.length;
+        const totalLikesReceived = myRecipes.reduce((sum, r) => sum + (r.likesCount || 0), 0);
+        const totalFavorites = await favoritesCollection.countDocuments({ userEmail: email });
+
+        const user = await usersCollection.findOne({ email });
+        const isPremium = user?.isPremium || false;
+
+        res.send({ totalRecipes, totalFavorites, totalLikesReceived, isPremium });
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch stats", error: err.message });
+      }
+    });
+
     // Get single recipe by id
     app.get("/recipes/:id", async (req, res) => {
       try {
