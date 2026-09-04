@@ -7,7 +7,7 @@ const client = new MongoClient(process.env.MONGO_URI);
 const db = client.db("recipeHubDB");
 
 export const auth = betterAuth({
-  database: mongodbAdapter(db),
+  database: mongodbAdapter(db, { usePlural: true }),
   secret: process.env.BETTER_AUTH_SECRET,
   baseURL: process.env.BETTER_AUTH_URL,
   trustedOrigins: ["http://localhost:5173"],
@@ -19,6 +19,25 @@ export const auth = betterAuth({
     google: {
       clientId: process.env.GOOGLE_CLIENT_ID,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    },
+  },
+  user: {
+    additionalFields: {
+      role: {
+        type: "string",
+        defaultValue: "user",
+        input: false,
+      },
+      isPremium: {
+        type: "boolean",
+        defaultValue: false,
+        input: false,
+      },
+      isBlocked: {
+        type: "boolean",
+        defaultValue: false,
+        input: false,
+      },
     },
   },
 });

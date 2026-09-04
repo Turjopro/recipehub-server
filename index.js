@@ -43,6 +43,93 @@ async function run() {
       res.send("RecipeHub server is running");
     });
 
+    // ===== ADMIN =====
+
+    // Get all users (admin only)
+    app.get("/users", async (req, res) => {
+      try {
+        const users = await usersCollection.find().toArray();
+        res.send(users);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch users", error: err.message });
+      }
+    });
+
+    // Block/Unblock a user
+    app.patch("/users/:id/block", async (req, res) => {
+      try {
+        const { isBlocked } = req.body;
+        const result = await usersCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: { isBlocked } }
+        );
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to update user", error: err.message });
+      }
+    });
+
+    // Admin dashboard stats
+    app.get("/admin-stats", async (req, res) => {
+      try {
+        const totalUsers = await usersCollection.countDocuments();
+        const totalRecipes = await recipesCollection.countDocuments();
+        const totalPremium = await usersCollection.countDocuments({ isPremium: true });
+        const totalReports = await reportsCollection.countDocuments();
+
+        res.send({ totalUsers, totalRecipes, totalPremium, totalReports });
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch admin stats", error: err.message });
+      }
+    });
+
+    // Feature/Unfeature a recipe (admin)
+    app.patch("/recipes/:id/feature", async (req, res) => {
+      try {
+        const { isFeatured } = req.body;
+        const result = await recipesCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: { isFeatured } }
+        );
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to update recipe", error: err.message });
+      }
+    });
+
+    // Get all reports (admin)
+    app.get("/reports", async (req, res) => {
+      try {
+        const reports = await reportsCollection.find().sort({ createdAt: -1 }).toArray();
+        res.send(reports);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch reports", error: err.message });
+      }
+    });
+
+    // Dismiss a report
+    app.patch("/reports/:id/dismiss", async (req, res) => {
+      try {
+        const result = await reportsCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: { status: "dismissed" } }
+        );
+        res.send(result);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to dismiss report", error: err.message });
+      }
+    });
+
+    // Get all transactions/payments (admin)
+    app.get("/payments", async (req, res) => {
+      try {
+        const payments = await paymentsCollection.find().sort({ paidAt: -1 }).toArray();
+        res.send(payments);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch payments", error: err.message });
+      }
+    });
+
     // ===== RECIPES =====
 
     // Get all recipes (with optional category filter + pagination)
