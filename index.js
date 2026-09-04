@@ -1,3 +1,4 @@
+import Stripe from "stripe";
 import { auth } from "./auth.js";
 import { toNodeHandler } from "better-auth/node";
 import express from "express";
@@ -9,6 +10,7 @@ dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 5000;
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 app.use(cors({
   origin: ["http://localhost:5173"],
@@ -41,6 +43,96 @@ async function run() {
 
     app.get("/", (req, res) => {
       res.send("RecipeHub server is running");
+    });
+
+    // ===== PAYMENTS (Stripe) =====
+
+    // Create a checkout session (for recipe purchase or premium membership)
+    app.post("/create-checkout-session", async (req, res) => {
+      try {
+        const { type, recipeId, recipeName, userEmail, userId } = req.body;
+
+        const isPremium = type === "premium";
+        const amount = isPremium ? 2000 : 500; // in cents: $20 premium, $5 recipe
+        const productName = isPremium ? "RecipeHub Premium Membership" : `Recipe: ${recipeName}`;
+
+        const session = await stripe.checkout.sessions.create({
+          payment_method_types: ["card"],
+          line_items: [
+            {
+              price_data: {
+                currency: "usd",
+                product_data: { name: productName },
+                unit_amount: amount,
+              },
+              quantity: 1,
+            },
+          ],
+          mode: "payment",
+          success_url: `http://localhost:5173/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+          cancel_url: `http://localhost:5173/recipe/${recipeId || ""}`,
+          metadata: {
+            type,
+            recipeId: recipeId || "",
+            userEmail,
+            userId,
+          },
+        });
+
+        res.send({ url: session.url });
+      } catch (err) {
+        res.status(500).send({ message: "Failed to create checkout session", error: err.message });
+      }
+    });
+
+    // Verify payment and record it (called from success page)
+    app.get("/verify-payment/:sessionId", async (req, res) => {
+      try {
+        const session = await stripe.checkout.sessions.retrieve(req.params.sessionId);
+
+        if (session.payment_status !== "paid") {
+          return res.status(400).send({ message: "Payment not completed" });
+        }
+
+        const { type, recipeId, userEmail, userId } = session.metadata;
+
+        const existing = await paymentsCollection.findOne({ transactionId: session.id });
+        if (existing) {
+          return res.send({ message: "Already recorded", payment: existing });
+        }
+
+        const payment = {
+          userEmail,
+          userId,
+          amount: session.amount_total / 100,
+          recipeId: recipeId || null,
+          transactionId: session.id,
+          paymentStatus: "paid",
+          type,
+          paidAt: new Date(),
+        };
+        await paymentsCollection.insertOne(payment);
+
+        if (type === "premium") {
+          await usersCollection.updateOne({ email: userEmail }, { $set: { isPremium: true } });
+        }
+
+        res.send({ message: "Payment recorded", payment });
+      } catch (err) {
+        res.status(500).send({ message: "Failed to verify payment", error: err.message });
+      }
+    });
+
+    // Get purchased recipes for a user
+    app.get("/purchased-recipes/:email", async (req, res) => {
+      try {
+        const payments = await paymentsCollection.find({ userEmail: req.params.email, type: "recipe" }).toArray();
+        const recipeIds = payments.map((p) => new ObjectId(p.recipeId));
+        const recipes = await recipesCollection.find({ _id: { $in: recipeIds } }).toArray();
+        res.send(recipes);
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch purchased recipes", error: err.message });
+      }
     });
 
     // ===== ADMIN =====
