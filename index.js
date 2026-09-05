@@ -549,6 +549,11 @@ async function run() {
 }
 run().catch(console.dir);
 
+// 404 handler for unmatched API routes
+app.use((req, res) => {
+  res.status(404).send({ message: "Route not found" });
+});
+
 app.listen(port, () => {
   console.log(`RecipeHub server running on port ${port}`);
 });
