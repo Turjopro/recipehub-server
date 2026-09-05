@@ -74,6 +74,11 @@ async function run() {
       res.send("RecipeHub server is running");
     });
 
+    // health check endpoint
+    app.get("/health", (req, res) => {
+      res.status(200).send({ status: "ok", timestamp: new Date() });
+    });
+
     // ===== PAYMENTS (Stripe) =====
 
     app.post("/create-checkout-session", verifyToken, async (req, res) => {
@@ -359,9 +364,27 @@ async function run() {
       }
     });
 
+    // input validation added
     app.post("/recipes", verifyToken, async (req, res) => {
       try {
         const recipe = req.body;
+
+        const requiredFields = [
+          "recipeName",
+          "category",
+          "cuisineType",
+          "difficultyLevel",
+          "preparationTime",
+          "ingredients",
+          "instructions",
+          "authorEmail",
+        ];
+        const missingFields = requiredFields.filter((field) => !recipe[field]);
+        if (missingFields.length > 0) {
+          return res.status(400).send({
+            message: `Missing required fields: ${missingFields.join(", ")}`,
+          });
+        }
 
         const user = await usersCollection.findOne({ email: recipe.authorEmail });
         const isPremium = user?.isPremium || false;
